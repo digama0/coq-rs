@@ -1,10 +1,12 @@
 [package]
-name = "vo-parser-rs"
+name = "coq-rs"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+stacker = "0.1"
+itertools = "0.12"
 byteorder = "1.4"
 zerocopy = { version = "0.7", features = ["derive"] }

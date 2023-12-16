@@ -1,8 +1,8 @@
-#![forbid(unsafe_code)]
 use crate::marshal::{Data, Object};
 use crate::parse::{Cacheable, FromData};
+use itertools::Itertools;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::rc::Rc;
+use std::sync::Arc;
 
 macro_rules! from_data_enum {
   ($($(#[$doc:meta])* pub enum $name:ident { $($a:ident$(($($b:ident: $ty:ty),*))? = $val:literal,)* })*) => {
@@ -14,6 +14,24 @@ macro_rules! from_data_enum {
             $(($val, [$($($b),*)?]) => $name::$a$(($(FromData::from_data(*$b, mem, _cache)),*))?,)*
             k => panic!("bad tag in {}: {k:?}", stringify!($name))
           }
+        }
+      }
+    )*
+  }
+}
+
+macro_rules! from_data_enum_rec {
+  ($($(#[$doc:meta])* pub enum $name:ident { $($a:ident$(($($b:ident: $ty:ty),*))? = $val:literal,)* })*) => {
+    $(
+      $(#[$doc])* pub enum $name { $($a$(($($ty),*))?),* }
+      impl FromData for $name {
+        fn from_data(d: Data, mem: &[Object<'_>], _cache: &mut Cache) -> Self {
+          stacker::maybe_grow(1024 * 1024, 16 * 1024, || {
+            match d.dest_block(mem) {
+              $(($val, [$($($b),*)?]) => $name::$a$(($(FromData::from_data(*$b, mem, _cache)),*))?,)*
+              k => panic!("bad tag in {}: {k:?}", stringify!($name))
+            }
+          })
         }
       }
     )*
@@ -36,15 +54,37 @@ macro_rules! from_data_struct {
   }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct List<T>(pub Vec<T>);
 
 impl<T: std::fmt::Debug> std::fmt::Debug for List<T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
 }
 
-pub type DirPath = List<Rc<str>>;
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DirPath(pub Vec<Arc<str>>);
 pub type CompilationUnitName = DirPath;
+
+impl FromData for DirPath {
+  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+    Self(<List<Arc<str>>>::from_data(d, mem, cache).0)
+  }
+}
+
+impl std::fmt::Display for DirPath {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}", self.0.iter().format("."))
+  }
+}
+impl std::fmt::Debug for DirPath {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}", self.0.iter().format("."))
+  }
+}
+
+impl From<&str> for DirPath {
+  fn from(value: &str) -> Self { DirPath(value.split('.').map(From::from).collect()) }
+}
 
 impl std::fmt::Debug for VoDigest {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,7 +98,7 @@ impl std::fmt::Debug for VoDigest {
 pub type HSet<V> = BTreeMap<i64, BTreeSet<V>>;
 pub type HMap<K, V> = BTreeMap<i64, BTreeMap<K, V>>;
 
-pub type Id = Rc<str>;
+pub type Id = Arc<str>;
 
 pub type UId = (i64, Id, DirPath);
 pub type Label = Id;
@@ -72,7 +112,7 @@ pub type Constraints = BTreeSet<UnivConstraint>;
 pub type Constrained<T> = (T, Constraints);
 pub type UniverseSet = HSet<Level>;
 pub type ContextSet = Constrained<UniverseSet>;
-pub type Instance = Rc<[Level]>;
+pub type Instance = Arc<[Level]>;
 // pub type Instance = (Vec<Quality>, Vec<Level>); // added in 8.20
 pub type PUniv<T> = (T, Instance);
 
@@ -81,16 +121,16 @@ pub type Fix = ((Vec<u32>, u32), RecDecl);
 pub type CoFix = (u32, RecDecl);
 
 pub type RelContext = List<RelDecl>;
-pub type NamedContext = List<Rc<NamedDecl>>;
+pub type NamedContext = List<Arc<NamedDecl>>;
 
 pub type DeltaResolver = (BTreeMap<ModPath, ModPath>, HMap<KerName, DeltaHint>);
 
 pub type FieldInfo = (Id, Vec<Label>, Vec<Relevance>, Vec<Type>);
 pub type StructBody = List<(Label, StructFieldBody)>;
 
-pub type Expr = Rc<ExprKind>;
-pub type ModPath = Rc<ModPathKind>;
-pub type KerPair = Rc<KerPairKind>;
+pub type Expr = Arc<ExprKind>;
+pub type ModPath = Arc<ModPathKind>;
+pub type KerPair = Arc<KerPairKind>;
 
 from_data_enum! {
   #[derive(Debug)]
@@ -98,14 +138,18 @@ from_data_enum! {
     Anonymous = 0,
     Name(a: Id) = 0,
   }
+}
 
+from_data_enum_rec! {
   #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
   pub enum ModPathKind {
     File(a: DirPath) = 0,
     Bound(a: UId) = 1,
     Dot(a: ModPath, b: Label) = 2,
   }
+}
 
+from_data_enum! {
   #[derive(PartialEq, Eq, PartialOrd, Ord)]
   pub enum KerPairKind {
     Same(a: KerName) = 0,
@@ -156,6 +200,15 @@ from_data_enum! {
   }
 
   #[derive(Debug)]
+  pub enum SortFamily {
+    SProp = 0,
+    Prop = 1,
+    Set = 2,
+    Type = 3,
+    QSort = 4,
+  }
+
+  #[derive(Debug)]
   pub enum Relevance {
     Relevant = 0,
     Irrelevant = 1,
@@ -177,23 +230,25 @@ from_data_enum! {
     Native = 1,
     Default = 2,
   }
+}
 
+from_data_enum_rec! {
   #[derive(Debug)]
   pub enum ExprKind {
     Rel(a: u32) = 0,
     Var(a: Id) = 1,
     Sort(a: Sort) = 4,
     Cast(a: Expr, b: CastKind, c: Expr) = 5,
-    Prod(a: Rc<BinderAnnot<Name>>, b: Type, c: Type) = 6,
-    Lambda(a: Rc<BinderAnnot<Name>>, b: Type, c: Expr) = 7,
-    LetIn(a: Rc<BinderAnnot<Name>>, b: Expr, c: Type, d: Expr) = 8,
-    App(a: Expr, args: Rc<[Expr]>) = 9,
+    Prod(a: Arc<BinderAnnot<Name>>, b: Type, c: Type) = 6,
+    Lambda(a: Arc<BinderAnnot<Name>>, b: Type, c: Expr) = 7,
+    LetIn(a: Arc<BinderAnnot<Name>>, b: Expr, c: Type, d: Expr) = 8,
+    App(a: Expr, args: Arc<[Expr]>) = 9,
     Const(a: PUniv<Constant>) = 10,
     Ind(a: PUniv<IndName>) = 11,
     Ctor(a: PUniv<CtorName>) = 12,
     Case(
-      a: Rc<CaseInfo>, b: Instance, c: Rc<[Expr]>, d: Box<CaseReturn>,
-      e: CaseInvert, f: Expr, g: Rc<[CaseBranch]>
+      a: Arc<CaseInfo>, b: Instance, c: Arc<[Expr]>, d: Box<CaseReturn>,
+      e: CaseInvert, f: Expr, g: Arc<[CaseBranch]>
     ) = 13,
     Fix(a: Fix) = 14,
     CoFix(a: CoFix) = 15,
@@ -203,11 +258,13 @@ from_data_enum! {
     Float(a: f64) = 18,
     Array(a: Instance, b: Vec<Expr>, c: Expr, d: Type) = 19,
   }
+}
 
+from_data_enum! {
   #[derive(Debug)]
   pub enum RelDecl {
-    LocalAssum(a: Rc<BinderAnnot<Name>>, b: Type) = 0,
-    LocalDef(a: Rc<BinderAnnot<Name>>, b: Expr, c: Type) = 1,
+    LocalAssum(a: Arc<BinderAnnot<Name>>, b: Type) = 0,
+    LocalDef(a: Arc<BinderAnnot<Name>>, b: Expr, c: Type) = 1,
   }
 
   #[derive(Debug)]
@@ -322,17 +379,22 @@ from_data_enum! {
   #[derive(Debug)]
   pub enum RecArg {
     NoRec = 0,
-    MutRec(a: IndName) = 1,
-    Nested(a: NestedType) = 2,
+    MutRec(a: IndName) = 0,
+    Nested(a: NestedType) = 1,
   }
+}
 
+from_data_enum_rec! {
   #[derive(Debug)]
   pub enum WfPaths {
     Var(a: u32, b: u32) = 0,
-    Node(a: RecArg, b: Vec<Vec<WfPaths>>) = 1,
+    Node(a: RecArg, b: Vec<WfPaths>) = 1,
+    // Node(a: RecArg, b: Vec<Vec<WfPaths>>) = 1, // new in 8.20
     Rec(a: u32, b: Vec<WfPaths>) = 2,
   }
+}
 
+from_data_enum! {
   #[derive(Debug)]
   pub enum IndArity {
     Regular(a: MonoIndArity) = 0,
@@ -387,7 +449,9 @@ from_data_enum! {
     Mod(a: List<Id>, b: ModPath) = 0,
     Def(a: List<Id>, b: (Expr, Option<AbstractContext>)) = 1,
   }
+}
 
+from_data_enum_rec! {
   #[derive(Debug)]
   pub enum ModAlgExpr {
     Ident(a: ModPath) = 0,
@@ -406,15 +470,17 @@ from_data_enum! {
   #[derive(Debug)]
   pub enum ModSig {
     NoFunctor(a: StructBody) = 0,
-    MoreFunctor(a: Id, b: Box<ModTypeBody>, c: Box<ModSig>) = 1,
+    MoreFunctor(a: UId, b: Box<ModTypeBody>, c: Box<ModSig>) = 1,
   }
 
   #[derive(Debug)]
   pub enum ModExpr {
-    NoFunctor(a: Box<ModSig>) = 0,
+    NoFunctor(a: Box<ModAlgExpr>) = 0,
     MoreFunctor(a: Box<ModExpr>) = 1,
   }
+}
 
+from_data_enum! {
   #[derive(Debug)]
   pub enum ModImpl {
     Abstract = 0,
@@ -423,6 +489,7 @@ from_data_enum! {
     FullStruct = 1,
   }
 
+  #[derive(PartialEq, Eq)]
   pub enum VoDigest {
     VoOrVi(lib: Box<[u8]>) = 0,
     ViVo(lib: Box<[u8]>, univ: Box<[u8]>) = 1,
@@ -439,7 +506,9 @@ from_data_enum! {
     Objs(a: List<LibObject>) = 0,
     Ref(a: ModPath, b: ModSubst) = 1,
   }
+}
 
+from_data_enum_rec! {
   #[derive(Debug)]
   pub enum LibObject {
     Module(a: Id, b: SubstObjs) = 0,
@@ -449,7 +518,9 @@ from_data_enum! {
     Export(a: List<(OpenFilter, ModPath)>) = 4,
     Atomic(a: Data) = 5,
   }
+}
 
+from_data_enum! {
   #[derive(Debug)]
   pub enum OrderRequest {
     Equal = 0,
@@ -487,15 +558,15 @@ pub type BoundNames = Vec<Name>;
 pub type AbstractContext = Constrained<BoundNames>;
 pub type UnivAbstracted<T> = (T, AbstractContext);
 
-pub type Proj = Rc<(Rc<ProjRepr>, bool)>;
+pub type Proj = Arc<(Arc<ProjRepr>, bool)>;
 
 pub type CaseInvert = Option<Vec<Expr>>;
-pub type CaseBranch = (Rc<[Rc<BinderAnnot<Name>>]>, Expr);
-pub type CaseReturn = (Rc<[Rc<BinderAnnot<Name>>]>, Type);
-// pub type CaseReturn = ((Vec<Rc<BinderAnnot<Name>>>, Type), Relevance); // new in 8.20
+pub type CaseBranch = (Arc<[Arc<BinderAnnot<Name>>]>, Expr);
+pub type CaseReturn = (Arc<[Arc<BinderAnnot<Name>>]>, Type);
+// pub type CaseReturn = ((Vec<Arc<BinderAnnot<Name>>>, Type), Relevance); // new in 8.20
 
 pub type EntryMap<T> = (HMap<Constant, T>, HMap<MutIndName, T>);
-pub type ExpandInfo = EntryMap<Rc<AbstrInstInfo>>;
+pub type ExpandInfo = EntryMap<Arc<AbstrInstInfo>>;
 
 impl std::fmt::Debug for KerNameKind {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.label) }
@@ -527,10 +598,10 @@ impl std::fmt::Debug for LevelKind {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.data.fmt(f) }
 }
 
-pub type KerName = Rc<KerNameKind>;
-pub type IndName = Rc<IndNameKind>;
-pub type CtorName = Rc<CtorNameKind>;
-pub type Level = Rc<LevelKind>;
+pub type KerName = Arc<KerNameKind>;
+pub type IndName = Arc<IndNameKind>;
+pub type CtorName = Arc<CtorNameKind>;
+pub type Level = Arc<LevelKind>;
 
 from_data_struct! {
   #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -555,7 +626,7 @@ from_data_struct! {
   #[derive(PartialEq, Eq, PartialOrd, Ord)]
   pub struct GlobalLevel {
     pub lib: DirPath,
-    pub process: Rc<str>,
+    pub process: Arc<str>,
     pub uid: u32,
   }
 
@@ -582,8 +653,8 @@ from_data_struct! {
   pub struct CaseInfo {
     pub ind: IndName,
     pub npar: u32,
-    pub cstr_ndecls: Rc<[u32]>,
-    pub cstr_nargs: Rc<[u32]>,
+    pub cstr_ndecls: Arc<[u32]>,
+    pub cstr_nargs: Arc<[u32]>,
     pub relevance: Relevance, // removed in 8.20
     pub pp_info: CasePrinting,
   }
@@ -600,7 +671,7 @@ from_data_struct! {
 
   #[derive(Debug)]
   pub struct RecDecl {
-    pub binders: Vec<Rc<BinderAnnot<Name>>>,
+    pub binders: Vec<Arc<BinderAnnot<Name>>>,
     pub types: Vec<Type>,
     pub exprs: Vec<Expr>,
   }
@@ -668,7 +739,7 @@ from_data_struct! {
     pub code: Option<Data>, // Option<BodyCode>
     pub univs: Universes,
     pub inline_code: bool,
-    pub typing_flags: Rc<TypingFlags>,
+    pub typing_flags: Arc<TypingFlags>,
   }
 
   #[derive(Debug)]
@@ -686,7 +757,8 @@ from_data_struct! {
     pub user_lc: Vec<Type>,
     pub n_real_args: u32,
     pub n_real_decls: u32,
-    pub squashed: Option<SquashInfo>,
+    pub kelim: SortFamily, // removed in 8.20
+    // pub squashed: Option<SquashInfo>, // added in 8.20
     pub nf_lc: Vec<(RelContext, Type)>,
     pub cons_n_real_args: Vec<u32>,
     pub cons_n_real_decls: Vec<u32>,
@@ -713,7 +785,7 @@ from_data_struct! {
     pub variance: Option<Vec<Variance>>,
     pub sec_variance: Option<Vec<Variance>>,
     pub private: Option<bool>,
-    pub flags: Rc<TypingFlags>,
+    pub flags: Arc<TypingFlags>,
   }
 
   #[derive(Debug)]
@@ -753,10 +825,9 @@ from_data_struct! {
   }
 }
 
-pub type OpaqueProof = (Expr, Rc<DelayedUniverses>);
+pub type OpaqueProof = (Expr, Arc<DelayedUniverses>);
 
 pub struct Library {
-  pub name: CompilationUnitName,
   pub compiled: CompiledLibrary,
   pub opaques: Vec<Option<OpaqueProof>>,
   pub deps: Vec<(CompilationUnitName, VoDigest)>,
@@ -768,17 +839,17 @@ macro_rules! mk_cache {
     #[derive(Default)]
     pub struct $cache {
       // used: HashMap<usize, std::backtrace::Backtrace>,
-      $($name: HashMap<usize, Rc<$ty>>,)*
+      $($name: HashMap<usize, Arc<$ty>>,)*
     }
     $(
       impl Cacheable for $ty {
-        fn get_mut(cache: &mut $cache) -> &mut HashMap<usize, Rc<Self>> { &mut cache.$name }
+        fn get_mut(cache: &mut $cache) -> &mut HashMap<usize, Arc<Self>> { &mut cache.$name }
       }
       mk_cache!(@impl $ty $(: $from)?);
     )*
   };
   (@impl $ty:ty: $from:ty) => {
-    impl FromData for Rc<$ty> {
+    impl FromData for Arc<$ty> {
       fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
         if let Some(val) = cache.try_from_data(d) {
           return val
@@ -811,10 +882,10 @@ mk_cache! {
     abstr_inst_info: AbstrInstInfo,
     case_info: CaseInfo,
     case_branch: [CaseBranch]: Vec<CaseBranch>,
-    case_return: [Rc<BinderAnnot<Name>>]: Vec<Rc<BinderAnnot<Name>>>,
+    case_return: [Arc<BinderAnnot<Name>>]: Vec<Arc<BinderAnnot<Name>>>,
     named_decl: NamedDecl,
     delayed_univs: DelayedUniverses,
     proj_repr: ProjRepr,
-    proj: (Rc<ProjRepr>, bool),
+    proj: (Arc<ProjRepr>, bool),
   }
 }

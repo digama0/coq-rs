@@ -1,8 +1,11 @@
+use crate::coqproject::SearchPaths;
 use crate::marshal::{parse, parse_objects, parse_str, Data, Object};
-use crate::types::{Cache, CompiledLibrary, Library, List, OpaqueProof, Summary, VoDigest};
+use crate::types::{
+  Cache, CompiledLibrary, DirPath, Library, List, OpaqueProof, Summary, VoDigest,
+};
 use byteorder::{ReadBytesExt, BE};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::{io, rc::Rc};
+use std::{io, sync::Arc};
 use zerocopy::big_endian::{U32, U64};
 use zerocopy::{FromBytes, FromZeroes, Ref, Unaligned};
 
@@ -50,11 +53,11 @@ impl Data {
 }
 
 pub trait Cacheable {
-  fn get_mut(cache: &mut Cache) -> &mut HashMap<usize, Rc<Self>>;
+  fn get_mut(cache: &mut Cache) -> &mut HashMap<usize, Arc<Self>>;
 }
 
 impl Cache {
-  pub fn try_from_data<T: Cacheable + ?Sized>(&mut self, d: Data) -> Option<Rc<T>> {
+  pub fn try_from_data<T: Cacheable + ?Sized>(&mut self, d: Data) -> Option<Arc<T>> {
     if let Data::Pointer(p) = d {
       return Some(T::get_mut(self).get(&p)?.clone())
     }
@@ -117,7 +120,7 @@ macro_rules! impl_from_data_enum {
             let ($($($a,)*)?) = ($($(FromData::from_data(*$a, mem, _cache),)*)?);
             $e
           },)*
-          _ => panic!("bad tag"),
+          k => panic!("bad tag: {k:?}"),
         }
       }
     })*
@@ -224,7 +227,7 @@ struct Segment {
 }
 
 impl Library {
-  pub fn from_file(path: impl AsRef<std::path::Path>) -> io::Result<Library> {
+  pub fn from_file(path: impl AsRef<std::path::Path>, name2: &DirPath) -> io::Result<Library> {
     let buf = std::fs::read(path)?;
     let (header, _) = Ref::<_, Header>::new_from_prefix(&*buf).unwrap();
     assert!(header.magic == *b"Coq!");
@@ -251,8 +254,16 @@ impl Library {
     let Summary { name, deps, .. } = parse_as::<Summary>(&buf, parse_seg(&mut summary, b"summary"));
     parse_as::<()>(&buf, parse_seg(&mut summary, b"tasks"));
     parse_as::<()>(&buf, parse_seg(&mut summary, b"universes"));
+    assert!(name == *name2);
     // println!("{:#?}", seg_sd);
     // println!("{:#?}", deps);
-    Ok(Library { name, compiled, opaques, deps, digest: VoDigest::VoOrVi(Box::new(seg_md.hash)) })
+    Ok(Library { compiled, opaques, deps, digest: VoDigest::VoOrVi(Box::new(seg_md.hash)) })
+  }
+}
+
+impl SearchPaths {
+  pub fn load_lib(&self, name: &DirPath) -> io::Result<Library> {
+    let Some(path) = self.find_path(name) else { panic!("{name} not found in loadpath") };
+    Library::from_file(path, name)
   }
 }
