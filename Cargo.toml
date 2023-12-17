@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+typed-arena = "2.0"
 stacker = "0.1"
 itertools = "0.12"
 byteorder = "1.4"

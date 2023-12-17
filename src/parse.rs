@@ -1,7 +1,7 @@
 use crate::coqproject::SearchPaths;
 use crate::marshal::{parse, parse_objects, parse_str, Data, Object};
 use crate::types::{
-  Cache, CompiledLibrary, DirPath, Library, List, OpaqueProof, Summary, VoDigest,
+  Cache, CompiledLibrary, DirPath, Library, List, OpaqueProof, RList, Summary, VoDigest,
 };
 use byteorder::{ReadBytesExt, BE};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -132,10 +132,7 @@ impl<T: FromData> FromData for List<T> {
     let mut out = vec![];
     loop {
       match d.dest_block(mem) {
-        (0, []) => {
-          out.reverse();
-          return List(out)
-        }
+        (0, []) => return List(out),
         (0, [a, b]) => {
           out.push(FromData::from_data(*a, mem, cache));
           d = *b;
@@ -143,6 +140,14 @@ impl<T: FromData> FromData for List<T> {
         k => panic!("bad tag: {k:?}"),
       }
     }
+  }
+}
+
+impl<T: FromData> FromData for RList<T> {
+  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+    let List(mut out) = List::from_data(d, mem, cache);
+    out.reverse();
+    RList(out)
   }
 }
 
@@ -206,8 +211,11 @@ impl<K: FromData + Ord, V: FromData> FromData for BTreeMap<K, V> {
   }
 }
 
-impl FromData for Data {
-  fn from_data(d: Data, _: &[Object<'_>], _: &mut Cache) -> Self { d }
+#[derive(Debug)]
+pub struct Any;
+
+impl FromData for Any {
+  fn from_data(_: Data, _: &[Object<'_>], _: &mut Cache) -> Self { Any }
 }
 
 #[derive(Debug, FromZeroes, FromBytes)]
@@ -242,14 +250,15 @@ impl Library {
     fn parse_as<T: FromData>(buf: &[u8], seg: &Segment) -> T {
       let (mut pos, next) = &buf[seg.pos.get() as usize..].split_at(seg.len.get() as usize);
       let mut memory = vec![];
-      let root = parse_objects(&mut pos, &mut memory);
+      let arena = typed_arena::Arena::new();
+      let root = parse_objects(&mut pos, &mut memory, &arena);
       assert!(pos.is_empty() && next[..16] == seg.hash);
       T::from_data(root, &memory, &mut Cache::default())
     }
     let mut summary = &buf[header.summary_pos.get() as usize..];
     assert!(summary.read_u32::<BE>()? == 5);
     let seg_md = parse_seg(&mut summary, b"library");
-    let compiled = parse_as::<(CompiledLibrary, Data, Data)>(&buf, seg_md).0;
+    let compiled = parse_as::<(CompiledLibrary, Any, Any)>(&buf, seg_md).0;
     let opaques = parse_as::<Vec<Option<OpaqueProof>>>(&buf, parse_seg(&mut summary, b"opaques"));
     let Summary { name, deps, .. } = parse_as::<Summary>(&buf, parse_seg(&mut summary, b"summary"));
     parse_as::<()>(&buf, parse_seg(&mut summary, b"tasks"));
@@ -264,6 +273,9 @@ impl Library {
 impl SearchPaths {
   pub fn load_lib(&self, name: &DirPath) -> io::Result<Library> {
     let Some(path) = self.find_path(name) else { panic!("{name} not found in loadpath") };
+    let mut v = path.clone();
+    v.set_extension("v");
+    println!("loading {name} -> {}", v.display());
     Library::from_file(path, name)
   }
 }

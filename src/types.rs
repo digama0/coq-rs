@@ -1,5 +1,5 @@
 use crate::marshal::{Data, Object};
-use crate::parse::{Cacheable, FromData};
+use crate::parse::{Any, Cacheable, FromData};
 use itertools::Itertools;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -62,12 +62,19 @@ impl<T: std::fmt::Debug> std::fmt::Debug for List<T> {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RList<T>(pub Vec<T>);
+
+impl<T: std::fmt::Debug> std::fmt::Debug for RList<T> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+}
+
+#[derive(Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirPath(pub Vec<Arc<str>>);
 pub type CompilationUnitName = DirPath;
 
 impl FromData for DirPath {
   fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
-    Self(<List<Arc<str>>>::from_data(d, mem, cache).0)
+    Self(<RList<Arc<str>>>::from_data(d, mem, cache).0)
   }
 }
 
@@ -120,8 +127,8 @@ pub type BinderAnnot<T> = (T, Relevance);
 pub type Fix = ((Vec<u32>, u32), RecDecl);
 pub type CoFix = (u32, RecDecl);
 
-pub type RelContext = List<RelDecl>;
-pub type NamedContext = List<Arc<NamedDecl>>;
+pub type RelContext = RList<RelDecl>;
+pub type NamedContext = RList<Arc<NamedDecl>>;
 
 pub type DeltaResolver = (BTreeMap<ModPath, ModPath>, HMap<KerName, DeltaHint>);
 
@@ -130,7 +137,6 @@ pub type StructBody = List<(Label, StructFieldBody)>;
 
 pub type Expr = Arc<ExprKind>;
 pub type ModPath = Arc<ModPathKind>;
-pub type KerPair = Arc<KerPairKind>;
 
 from_data_enum! {
   #[derive(Debug)]
@@ -141,7 +147,7 @@ from_data_enum! {
 }
 
 from_data_enum_rec! {
-  #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(Hash, Debug, PartialEq, Eq, PartialOrd, Ord)]
   pub enum ModPathKind {
     File(a: DirPath) = 0,
     Bound(a: UId) = 1,
@@ -155,7 +161,37 @@ from_data_enum! {
     Same(a: KerName) = 0,
     Dual(user: KerName, canon: KerName) = 1,
   }
+}
+impl KerPairKind {
+  pub fn user(&self) -> &KerName {
+    let (KerPairKind::Same(a) | KerPairKind::Dual(a, _)) = self;
+    a
+  }
+}
 
+impl std::fmt::Debug for KerPairKind {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.user().fmt(f) }
+}
+
+pub type KerPair = Arc<KerPairKind>;
+
+#[derive(Eq)]
+pub struct UserKerPair(pub KerPair);
+
+impl std::hash::Hash for UserKerPair {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.0.user().hash(state) }
+}
+impl PartialEq for UserKerPair {
+  fn eq(&self, other: &Self) -> bool { self.0.user() == other.0.user() }
+}
+impl PartialOrd for UserKerPair {
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for UserKerPair {
+  fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.user().cmp(other.0.user()) }
+}
+
+from_data_enum! {
   #[derive(PartialEq, Eq, PartialOrd, Ord)]
   pub enum RawLevel {
     Set = 0,
@@ -275,8 +311,8 @@ from_data_enum! {
 
   #[derive(Debug)]
   pub enum CompactedDecl {
-    LocalAssum(a: List<BinderAnnot<Id>>, b: Type) = 0,
-    LocalDef(a: List<BinderAnnot<Id>>, b: Expr, c: Type) = 1,
+    LocalAssum(a: RList<BinderAnnot<Id>>, b: Type) = 0,
+    LocalDef(a: RList<BinderAnnot<Id>>, b: Expr, c: Type) = 1,
   }
 
   #[derive(Debug)]
@@ -287,7 +323,7 @@ from_data_enum! {
 
   #[derive(Debug)]
   pub enum Opaque {
-    Indirect(subst: List<ModSubst>, discharge: List<CookingInfo>, lib: DirPath, index: u32) = 0,
+    Indirect(subst: RList<ModSubst>, discharge: RList<CookingInfo>, lib: DirPath, index: u32) = 0,
   }
 
   #[derive(Debug)]
@@ -463,7 +499,7 @@ from_data_enum_rec! {
   pub enum StructFieldBody {
     Const(a: Box<ConstBody>) = 0,
     MutInd(a: Box<MutIndBody>) = 1,
-    Module(a: Box<ModBody>) = 2,
+    Module(a: Arc<ModBody>) = 2,
     ModType(a: Box<ModTypeBody>) = 3,
   }
 
@@ -501,24 +537,24 @@ from_data_enum! {
     Filtered(a: Predicate<String>) = 1,
   }
 
-  #[derive(Debug)]
-  pub enum AlgebraicObjs {
-    Objs(a: List<LibObject>) = 0,
-    Ref(a: ModPath, b: ModSubst) = 1,
-  }
+  // #[derive(Debug)]
+  // pub enum AlgebraicObjs {
+  //   Objs(a: RList<LibObject>) = 0,
+  //   Ref(a: ModPath, b: ModSubst) = 1,
+  // }
 }
 
-from_data_enum_rec! {
-  #[derive(Debug)]
-  pub enum LibObject {
-    Module(a: Id, b: SubstObjs) = 0,
-    ModuleType(a: Id, b: SubstObjs) = 1,
-    Include(a: AlgebraicObjs) = 2,
-    Keep(a: Id, b: List<LibObject>) = 3,
-    Export(a: List<(OpenFilter, ModPath)>) = 4,
-    Atomic(a: Data) = 5,
-  }
-}
+// from_data_enum_rec! {
+//   #[derive(Debug)]
+//   pub enum LibObject {
+//     Module(a: Id, b: SubstObjs) = 0,
+//     ModuleType(a: Id, b: SubstObjs) = 1,
+//     Include(a: AlgebraicObjs) = 2,
+//     Keep(a: Id, b: List<LibObject>) = 3,
+//     Export(a: List<(OpenFilter, ModPath)>) = 4,
+//     Atomic(a: Any) = 5,
+//   }
+// }
 
 from_data_enum! {
   #[derive(Debug)]
@@ -546,7 +582,7 @@ from_data_enum! {
   }
 }
 
-pub type SubstObjs = (List<UId>, AlgebraicObjs);
+// pub type SubstObjs = (List<UId>, AlgebraicObjs);
 pub type ModSubst = BTreeMap<ModPath, (ModPath, DeltaResolver)>;
 
 pub type Type = Expr;
@@ -568,18 +604,6 @@ pub type CaseReturn = (Arc<[Arc<BinderAnnot<Name>>]>, Type);
 pub type EntryMap<T> = (HMap<Constant, T>, HMap<MutIndName, T>);
 pub type ExpandInfo = EntryMap<Arc<AbstrInstInfo>>;
 
-impl std::fmt::Debug for KerNameKind {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.label) }
-}
-
-impl std::fmt::Debug for KerPairKind {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      KerPairKind::Same(a) | KerPairKind::Dual(a, _) => write!(f, "{:?}", a),
-    }
-  }
-}
-
 impl std::fmt::Debug for GlobalLevel {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "g{:?}", self.uid)
@@ -598,13 +622,17 @@ impl std::fmt::Debug for LevelKind {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.data.fmt(f) }
 }
 
+impl std::fmt::Debug for KerNameKind {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.label) }
+}
+
 pub type KerName = Arc<KerNameKind>;
 pub type IndName = Arc<IndNameKind>;
 pub type CtorName = Arc<CtorNameKind>;
 pub type Level = Arc<LevelKind>;
 
 from_data_struct! {
-  #[derive(PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(Hash, PartialEq, Eq, PartialOrd, Ord)]
   pub struct KerNameKind {
     pub path: ModPath,
     pub label: Label,
@@ -685,7 +713,7 @@ from_data_struct! {
 
   #[derive(Debug)]
   pub struct AbstrInstInfo {
-    pub rev_inst: List<Id>,
+    pub inst: RList<Id>,
     pub uinst: Instance,
   }
 
@@ -710,7 +738,7 @@ from_data_struct! {
 
   #[derive(Debug)]
   pub struct TemplateUnivs {
-    pub param_levels: List<Option<Level>>,
+    pub param_levels: RList<Option<Level>>,
     pub context: ContextSet,
   }
 
@@ -736,7 +764,7 @@ from_data_struct! {
     pub body: ConstDef,
     pub ty: Type,
     pub relevance: Relevance,
-    pub code: Option<Data>, // Option<BodyCode>
+    pub code: Option<Any>, // Option<BodyCode>
     pub univs: Universes,
     pub inline_code: bool,
     pub typing_flags: Arc<TypingFlags>,
@@ -766,7 +794,7 @@ from_data_struct! {
     pub relevance: Relevance,
     pub nb_constant: u32,
     pub nb_args: u32,
-    pub reloc_tbl: Data,
+    pub reloc_tbl: Any,
   }
 
   #[derive(Debug)]
@@ -811,7 +839,7 @@ from_data_struct! {
   #[derive(Debug)]
   pub struct CompiledLibrary {
     pub name: DirPath,
-    pub mod_: ModBody,
+    pub mod_: Arc<ModBody>,
     pub univs: ContextSet,
     pub deps: Vec<(CompilationUnitName, VoDigest)>,
   }
@@ -887,5 +915,6 @@ mk_cache! {
     delayed_univs: DelayedUniverses,
     proj_repr: ProjRepr,
     proj: (Arc<ProjRepr>, bool),
+    mod_body: ModBody,
   }
 }

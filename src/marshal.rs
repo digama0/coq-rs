@@ -1,4 +1,5 @@
 use byteorder::{BE, LE};
+use typed_arena::Arena;
 use zerocopy::big_endian::{I16, I32, I64, U16, U32, U64};
 use zerocopy::{FromBytes, FromZeroes, Ref, F64};
 
@@ -113,7 +114,7 @@ fn parse_object<'a>(pos: &mut &'a [u8]) -> Tag<'a> {
 
 #[derive(Debug, FromZeroes, FromBytes)]
 struct ObjectHeader {
-  magic: [u8; 4],
+  magic: U32,
   _length: U32,
   _objects: U32,
   _size32: U32,
@@ -129,7 +130,7 @@ pub enum Data {
 }
 
 pub enum Object<'a> {
-  Struct(u8, Box<[Data]>),
+  Struct(u8, &'a mut [Data]),
   Int64(i64),
   Float(f64),
   Str(&'a [u8]),
@@ -146,10 +147,12 @@ impl<'a> std::fmt::Debug for Object<'a> {
   }
 }
 
-pub fn parse_objects<'a>(pos: &mut &'a [u8], objects: &mut Vec<Object<'a>>) -> Data {
+pub fn parse_objects<'a>(
+  pos: &mut &'a [u8], objects: &mut Vec<Object<'a>>, arena: &'a Arena<Data>,
+) -> Data {
   fn push_vec<T>(vec: &mut Vec<T>, val: T) -> usize { (vec.len(), vec.push(val)).0 }
   let header = parse::<ObjectHeader>(pos);
-  assert_eq!(header.magic, [132, 149, 166, 190]);
+  assert_eq!(header.magic.get(), 0x8495a6be);
   let mut stack = vec![];
   let mut result = Data::Atom(0);
   loop {
@@ -159,7 +162,8 @@ pub fn parse_objects<'a>(pos: &mut &'a [u8], objects: &mut Vec<Object<'a>>) -> D
       Tag::Str(s) => (Data::Pointer(push_vec(objects, Object::Str(s))), None),
       Tag::Block(tag, 0) => (Data::Atom(tag), None),
       Tag::Block(tag, len) => {
-        let p = push_vec(objects, Object::Struct(tag, vec![Data::Atom(0); len].into_boxed_slice()));
+        let args = arena.alloc_extend(std::iter::repeat(Data::Atom(0)).take(len));
+        let p = push_vec(objects, Object::Struct(tag, args));
         (Data::Pointer(p), Some(p))
       }
       Tag::Code(addr) => (Data::Code(addr), None),
