@@ -10,7 +10,7 @@ use zerocopy::big_endian::{U32, U64};
 use zerocopy::{FromBytes, FromZeroes, Ref, Unaligned};
 
 impl Data {
-  pub fn dest_block<'a>(self, mem: &'a [Object<'_>]) -> (u8, &'a [Data]) {
+  pub fn dest_block(self, mem: &'static [Object]) -> (u8, &'static [Data]) {
     match self {
       Data::Atom(tag) => (tag, &[]),
       Data::Pointer(p) => match &mem[p as usize] {
@@ -22,7 +22,7 @@ impl Data {
     }
   }
 
-  pub fn dest_str<'a>(self, mem: &[Object<'a>]) -> &'a [u8] {
+  pub fn dest_str(self, mem: &'static [Object]) -> &'static [u8] {
     match self {
       Data::Pointer(p) => match &mem[p as usize] {
         Object::Str(data) => data,
@@ -31,7 +31,7 @@ impl Data {
       _ => panic!("bad data"),
     }
   }
-  pub fn dest_int(self, mem: &[Object<'_>]) -> i64 {
+  pub fn dest_int(self, mem: &'static [Object]) -> i64 {
     match self {
       Data::Pointer(p) => match mem[p as usize] {
         Object::Int64(data) => data,
@@ -41,7 +41,7 @@ impl Data {
       _ => panic!("bad data"),
     }
   }
-  pub fn dest_float(self, mem: &[Object<'_>]) -> f64 {
+  pub fn dest_float(self, mem: &'static [Object]) -> f64 {
     match self {
       Data::Pointer(p) => match mem[p as usize] {
         Object::Float(data) => data,
@@ -66,26 +66,26 @@ impl Cache {
 }
 
 pub trait FromData {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self;
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self;
 }
 
 impl FromData for i64 {
-  fn from_data(d: Data, mem: &[Object<'_>], _: &mut Cache) -> Self { d.dest_int(mem) }
+  fn from_data(d: Data, mem: &'static [Object], _: &mut Cache) -> Self { d.dest_int(mem) }
 }
 impl FromData for u32 {
-  fn from_data(d: Data, mem: &[Object<'_>], _: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], _: &mut Cache) -> Self {
     d.dest_int(mem).try_into().unwrap()
   }
 }
 impl FromData for f64 {
-  fn from_data(d: Data, mem: &[Object<'_>], _: &mut Cache) -> Self { d.dest_float(mem) }
+  fn from_data(d: Data, mem: &'static [Object], _: &mut Cache) -> Self { d.dest_float(mem) }
 }
 
 macro_rules! impl_from_data_tuple {
   ($(($($ty:ident),*);)*) => {
     $(impl<$($ty: FromData),*> FromData for ($($ty,)*) {
       #[allow(non_snake_case)]
-      fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+      fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
         match d.dest_block(mem) {
           (0, [$($ty),*]) => ($(FromData::from_data(*$ty, mem, cache),)*),
           k => panic!("bad tag in {}: {k:?}", stringify!(($($ty),*)))
@@ -97,14 +97,14 @@ macro_rules! impl_from_data_tuple {
 impl_from_data_tuple! { (A); (A, B); (A, B, C); (A, B, C, D); }
 
 impl<T: FromData> FromData for Vec<T> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let (_, args) = d.dest_block(mem);
     args.iter().map(|d| T::from_data(*d, mem, cache)).collect()
   }
 }
 
 impl<T: FromData> FromData for Box<T> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     Box::new(T::from_data(d, mem, cache))
   }
 }
@@ -114,7 +114,7 @@ macro_rules! impl_from_data_enum {
     $($n:literal$(($($a:ident),*))? => $e:expr,)*
   })*) => {
     $(impl$(<$($g: FromData),*>)? FromData for $name {
-      fn from_data(d: Data, mem: &[Object<'_>], _cache: &mut Cache) -> Self {
+      fn from_data(d: Data, mem: &'static [Object], _cache: &mut Cache) -> Self {
         match d.dest_block(mem) {
           $(($n, [$($($a),*)?]) => {
             let ($($($a,)*)?) = ($($(FromData::from_data(*$a, mem, _cache),)*)?);
@@ -128,7 +128,7 @@ macro_rules! impl_from_data_enum {
 }
 
 impl<T: FromData> FromData for List<T> {
-  fn from_data(mut d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(mut d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let mut out = vec![];
     loop {
       match d.dest_block(mem) {
@@ -144,7 +144,7 @@ impl<T: FromData> FromData for List<T> {
 }
 
 impl<T: FromData> FromData for RList<T> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let List(mut out) = List::from_data(d, mem, cache);
     out.reverse();
     RList(out)
@@ -157,20 +157,26 @@ impl_from_data_enum! {
   enum<T> for Option<T> { 0() => None, 0(a) => Some(a), }
 }
 
+impl FromData for &'static str {
+  fn from_data(d: Data, mem: &'static [Object], _: &mut Cache) -> Self {
+    std::str::from_utf8(d.dest_str(mem)).unwrap()
+  }
+}
+
 impl FromData for String {
-  fn from_data(d: Data, mem: &[Object<'_>], _: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], _: &mut Cache) -> Self {
     Self::from_utf8(d.dest_str(mem).to_vec()).unwrap()
   }
 }
 
 impl FromData for Box<[u8]> {
-  fn from_data(d: Data, mem: &[Object<'_>], _: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], _: &mut Cache) -> Self {
     d.dest_str(mem).to_vec().into()
   }
 }
 
 fn parse_set(
-  mut d: Data, mem: &[Object<'_>], cache: &mut Cache, stack: &mut Vec<Data>,
+  mut d: Data, mem: &'static [Object], cache: &mut Cache, stack: &mut Vec<Data>,
   f: &mut impl FnMut(Data, &mut Cache),
 ) {
   loop {
@@ -190,7 +196,7 @@ fn parse_set(
 }
 
 fn parse_map(
-  mut d: Data, mem: &[Object<'_>], cache: &mut Cache, stack: &mut Vec<Data>,
+  mut d: Data, mem: &'static [Object], cache: &mut Cache, stack: &mut Vec<Data>,
   f: &mut impl FnMut(Data, Data, &mut Cache),
 ) {
   loop {
@@ -210,7 +216,7 @@ fn parse_map(
 }
 
 impl<T: FromData + Ord> FromData for BTreeSet<T> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let mut out = BTreeSet::new();
     parse_set(d, mem, cache, &mut vec![], &mut |k, cache| {
       out.insert(T::from_data(k, mem, cache));
@@ -220,7 +226,7 @@ impl<T: FromData + Ord> FromData for BTreeSet<T> {
 }
 
 impl<K: FromData + Ord, V: FromData> FromData for BTreeMap<K, V> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let mut out = BTreeMap::new();
     parse_map(d, mem, cache, &mut vec![], &mut |k, v, cache| {
       out.insert(K::from_data(k, mem, cache), V::from_data(v, mem, cache));
@@ -230,7 +236,7 @@ impl<K: FromData + Ord, V: FromData> FromData for BTreeMap<K, V> {
 }
 
 impl<T: FromData + std::hash::Hash + Eq> FromData for HashSet<T> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let mut stack = vec![];
     let mut out = HashSet::new();
     parse_map(d, mem, cache, &mut vec![], &mut |_, v, cache| {
@@ -243,7 +249,7 @@ impl<T: FromData + std::hash::Hash + Eq> FromData for HashSet<T> {
 }
 
 impl<K: FromData + std::hash::Hash + Eq, V: FromData> FromData for HashMap<K, V> {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
     let mut stack = vec![];
     let mut out = HashMap::new();
     parse_map(d, mem, cache, &mut vec![], &mut |_, v, cache| {
@@ -258,8 +264,37 @@ impl<K: FromData + std::hash::Hash + Eq, V: FromData> FromData for HashMap<K, V>
 #[derive(Debug)]
 pub struct Any;
 
+pub struct Segment {
+  pub hash: [u8; 16],
+  pub root: Data,
+  pub mem: &'static [Object],
+  pub cache: Cache,
+}
+impl Segment {
+  pub fn get<T: FromData>(&mut self, d: Data) -> T { T::from_data(d, self.mem, &mut self.cache) }
+  pub fn root<T: FromData>(&mut self) -> T { self.get(self.root) }
+}
+
 impl FromData for Any {
-  fn from_data(_: Data, _: &[Object<'_>], _: &mut Cache) -> Self { Any }
+  fn from_data(_: Data, _: &[Object], _: &mut Cache) -> Self { Any }
+}
+
+#[derive(Clone, Debug)]
+pub enum Lazy<T> {
+  Unloaded(Data),
+  Loaded(T),
+}
+impl<T> FromData for Lazy<T> {
+  fn from_data(d: Data, _: &'static [Object], _: &mut Cache) -> Self { Self::Unloaded(d) }
+}
+impl<T: FromData> Lazy<T> {
+  pub fn get(&mut self, seg: &mut Segment) -> &mut T {
+    if let Self::Unloaded(d) = *self {
+      *self = Self::Loaded(seg.get(d));
+    }
+    let Self::Loaded(t) = self else { unreachable!() };
+    t
+  }
 }
 
 #[derive(Debug, FromZeroes, FromBytes)]
@@ -272,7 +307,7 @@ struct Header {
 
 #[derive(Debug, FromZeroes, FromBytes, Unaligned)]
 #[repr(C)]
-struct Segment {
+struct SegmentHeader {
   pos: U64,
   len: U64,
   hash: [u8; 16],
@@ -287,26 +322,28 @@ impl Library {
       81800 => {}
       n => panic!("unsupported version {n}"),
     }
-    fn parse_seg<'a>(summary: &mut &'a [u8], name: &'static [u8]) -> &'a Segment {
+    fn parse_seg(
+      summary: &mut &[u8], buf: &[u8], arena: &'static typed_arena::Arena<Data>,
+      name: &'static [u8],
+    ) -> Box<Segment> {
       assert!(parse_str(parse::<U32>(summary).get() as usize, summary) == name);
-      parse(summary)
-    }
-    fn parse_as<T: FromData>(buf: &[u8], seg: &Segment) -> T {
+      let seg = parse::<SegmentHeader>(summary);
       let (mut pos, next) = &buf[seg.pos.get() as usize..].split_at(seg.len.get() as usize);
       let mut memory = vec![];
-      let arena = typed_arena::Arena::new();
-      let root = parse_objects(&mut pos, &mut memory, &arena);
+      let root = parse_objects(&mut pos, &mut memory, arena);
       assert!(pos.is_empty() && next[..16] == seg.hash);
-      T::from_data(root, &memory, &mut Cache::default())
+      Box::new(Segment { root, hash: seg.hash, mem: Vec::leak(memory), cache: Cache::default() })
     }
+    let arena = Box::leak(Box::new(typed_arena::Arena::new()));
     let mut summary = &buf[header.summary_pos.get() as usize..];
     assert!(summary.read_u32::<BE>()? == 5);
-    let seg_md = parse_seg(&mut summary, b"library");
-    let compiled = parse_as::<(CompiledLibrary, Any, Any)>(&buf, seg_md).0;
-    let opaques = parse_as::<Vec<Option<OpaqueProof>>>(&buf, parse_seg(&mut summary, b"opaques"));
-    let Summary { name, deps, .. } = parse_as::<Summary>(&buf, parse_seg(&mut summary, b"summary"));
-    parse_as::<()>(&buf, parse_seg(&mut summary, b"tasks"));
-    parse_as::<()>(&buf, parse_seg(&mut summary, b"universes"));
+    let mut seg_md = parse_seg(&mut summary, &buf, arena, b"library");
+    let compiled = seg_md.root::<(CompiledLibrary, Any, Any)>().0;
+    let opaques =
+      parse_seg(&mut summary, &buf, arena, b"opaques").root::<Vec<Option<OpaqueProof>>>();
+    let Summary { name, deps, .. } = parse_seg(&mut summary, &buf, arena, b"summary").root();
+    parse_seg(&mut summary, &buf, arena, b"tasks").root::<()>();
+    parse_seg(&mut summary, &buf, arena, b"universes").root::<()>();
     assert!(name == *name2);
     // println!("{:#?}", seg_sd);
     // println!("{:#?}", deps);

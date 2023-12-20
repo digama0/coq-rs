@@ -1,5 +1,5 @@
 use crate::marshal::{Data, Object};
-use crate::parse::{Any, Cacheable, FromData};
+use crate::parse::{Any, Cacheable, FromData, Lazy};
 use itertools::Itertools;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ macro_rules! from_data_enum {
     $(
       $(#[$doc])* pub enum $name { $($a$(($($ty),*))?),* }
       impl FromData for $name {
-        fn from_data(d: Data, mem: &[Object<'_>], _cache: &mut Cache) -> Self {
+        fn from_data(d: Data, mem: &'static [Object], _cache: &mut Cache) -> Self {
           match d.dest_block(mem) {
             $(($val, [$($($b),*)?]) => $name::$a$(($(FromData::from_data(*$b, mem, _cache)),*))?,)*
             k => panic!("bad tag in {}: {k:?}", stringify!($name))
@@ -25,7 +25,7 @@ macro_rules! from_data_enum_rec {
     $(
       $(#[$doc])* pub enum $name { $($a$(($($ty),*))?),* }
       impl FromData for $name {
-        fn from_data(d: Data, mem: &[Object<'_>], _cache: &mut Cache) -> Self {
+        fn from_data(d: Data, mem: &'static [Object], _cache: &mut Cache) -> Self {
           stacker::maybe_grow(1024 * 1024, 16 * 1024, || {
             match d.dest_block(mem) {
               $(($val, [$($($b),*)?]) => $name::$a$(($(FromData::from_data(*$b, mem, _cache)),*))?,)*
@@ -43,7 +43,7 @@ macro_rules! from_data_struct {
     $(
       $(#[$doc])* pub struct $name { $(pub $a: $ty),* }
       impl FromData for $name {
-        fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+        fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
           let (_, [$($a),*]) = d.dest_block(mem) else {
             panic!("bad tag in {}: {:?}", stringify!($name), d.dest_block(mem))
           };
@@ -69,12 +69,12 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RList<T> {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DirPath(pub Vec<Arc<str>>);
+pub struct DirPath(pub Vec<&'static str>);
 pub type CompilationUnitName = DirPath;
 
 impl FromData for DirPath {
-  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
-    Self(<RList<Arc<str>>>::from_data(d, mem, cache).0)
+  fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
+    Self(<RList<&'static str>>::from_data(d, mem, cache).0)
   }
 }
 
@@ -89,8 +89,8 @@ impl std::fmt::Debug for DirPath {
   }
 }
 
-impl From<&str> for DirPath {
-  fn from(value: &str) -> Self { DirPath(value.split('.').map(From::from).collect()) }
+impl From<&'static str> for DirPath {
+  fn from(value: &'static str) -> Self { DirPath(value.split('.').map(From::from).collect()) }
 }
 
 impl std::fmt::Debug for VoDigest {
@@ -102,7 +102,7 @@ impl std::fmt::Debug for VoDigest {
   }
 }
 
-pub type Id = Arc<str>;
+pub type Id = &'static str;
 
 pub type UId = (i64, Id, DirPath);
 pub type Label = Id;
@@ -200,7 +200,7 @@ from_data_enum! {
   #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
   pub enum QVar {
     Var(a: u32) = 0,
-    Unif(a: Arc<str>, b: u32) = 1,
+    Unif(a: &'static str, b: u32) = 1,
   }
 
   #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -481,7 +481,7 @@ from_data_enum! {
   #[derive(Debug)]
   pub enum WithDecl {
     Mod(a: List<Id>, b: ModPath) = 0,
-    Def(a: List<Id>, b: (Expr, Option<AbstractContext>)) = 1,
+    Def(a: List<Id>, b: (Lazy<Expr>, Option<AbstractContext>)) = 1,
   }
 }
 
@@ -496,9 +496,9 @@ from_data_enum_rec! {
   #[derive(Debug)]
   pub enum StructFieldBody {
     Const(a: Arc<ConstBody>) = 0,
-    MutInd(a: Arc<MutIndBody>) = 1,
+    MutInd(a: Lazy<Arc<MutIndBody>>) = 1,
     Module(a: Arc<ModBody>) = 2,
-    ModType(a: Arc<ModTypeBody>) = 3,
+    ModType(a: Lazy<Arc<ModTypeBody>>) = 3,
   }
 
   #[derive(Debug)]
@@ -510,7 +510,7 @@ from_data_enum_rec! {
   #[derive(Debug)]
   pub enum ModExpr {
     NoFunctor(a: Box<ModAlgExpr>) = 0,
-    MoreFunctor(a: Box<ModExpr>) = 1,
+    MoreFunctor(a: Lazy<Box<ModExpr>>) = 1,
   }
 }
 
@@ -599,7 +599,7 @@ pub type CaseBranch = (Arc<[Arc<BinderAnnot<Name>>]>, Expr);
 pub type CaseReturn = (Arc<[Arc<BinderAnnot<Name>>]>, Type);
 // pub type CaseReturn = ((Vec<Arc<BinderAnnot<Name>>>, Type), Relevance); // new in 8.20
 
-pub type EntryMap<T> = (HashMap<Constant, T>, HashMap<MutIndName, T>);
+pub type EntryMap<T> = (Lazy<HashMap<Constant, T>>, Lazy<HashMap<MutIndName, T>>);
 pub type ExpandInfo = EntryMap<Arc<AbstrInstInfo>>;
 
 impl std::fmt::Debug for GlobalLevel {
@@ -660,7 +660,7 @@ from_data_struct! {
   #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct GlobalLevel {
     pub lib: DirPath,
-    pub process: Arc<str>,
+    pub process: &'static str,
     pub uid: u32,
   }
 
@@ -732,7 +732,7 @@ from_data_struct! {
   #[derive(Debug)]
   pub struct ConvOracle {
     pub var_opacity: BTreeMap<Id, Transparency>,
-    pub cst_opacity: HashMap<Constant, Transparency>,
+    pub cst_opacity: Lazy<HashMap<Constant, Transparency>>,
     pub var_trstate: Predicate<Id>,
     pub cst_trstate: Predicate<Constant>,
   }
@@ -767,8 +767,8 @@ from_data_struct! {
   pub struct ConstBody {
     pub hyps: (),
     pub univ_hyps: Instance,
-    pub body: ConstDef,
-    pub ty: Type,
+    pub body: Lazy<ConstDef>,
+    pub ty: Lazy<Type>,
     pub relevance: Relevance,
     pub code: Option<Any>, // Option<BodyCode>
     pub univs: Universes,
@@ -929,7 +929,7 @@ macro_rules! mk_cache {
   };
   (@impl $ty:ty: $from:ty) => {
     impl FromData for Arc<$ty> {
-      fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+      fn from_data(d: Data, mem: &'static [Object], cache: &mut Cache) -> Self {
         if let Some(val) = cache.try_from_data(d) {
           return val
         }

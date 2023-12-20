@@ -129,14 +129,14 @@ pub enum Data {
   Code(usize),
 }
 
-pub enum Object<'a> {
-  Struct(u8, &'a mut [Data]),
+pub enum Object {
+  Struct(u8, &'static mut [Data]),
   Int64(i64),
   Float(f64),
-  Str(&'a [u8]),
+  Str(&'static [u8]),
 }
 
-impl<'a> std::fmt::Debug for Object<'a> {
+impl std::fmt::Debug for Object {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       Self::Struct(arg0, arg1) => f.debug_tuple("Struct").field(arg0).field(arg1).finish(),
@@ -147,8 +147,8 @@ impl<'a> std::fmt::Debug for Object<'a> {
   }
 }
 
-pub fn parse_objects<'a>(
-  pos: &mut &'a [u8], objects: &mut Vec<Object<'a>>, arena: &'a Arena<Data>,
+pub fn parse_objects(
+  pos: &mut &[u8], objects: &mut Vec<Object>, arena: &'static Arena<Data>,
 ) -> Data {
   fn push_vec<T>(vec: &mut Vec<T>, val: T) -> usize { (vec.len(), vec.push(val)).0 }
   let header = parse::<ObjectHeader>(pos);
@@ -159,7 +159,10 @@ pub fn parse_objects<'a>(
     let (data, to_push) = match parse_object(pos) {
       Tag::Pointer(n) => (Data::Pointer((objects.len() - n).try_into().unwrap()), None),
       Tag::Int(n) => (Data::Int(n), None),
-      Tag::Str(s) => (Data::Pointer(push_vec(objects, Object::Str(s)).try_into().unwrap()), None),
+      Tag::Str(s) => {
+        let s = Vec::leak(Vec::from(s));
+        (Data::Pointer(push_vec(objects, Object::Str(s)).try_into().unwrap()), None)
+      }
       Tag::Block(tag, 0) => (Data::Atom(tag), None),
       Tag::Block(tag, len) => {
         let args = arena.alloc_extend(std::iter::repeat(Data::Atom(0)).take(len));

@@ -18,6 +18,7 @@ impl SearchPaths {
         ["-impredicative-set", _] =>
           panic!("Use \"-arg -impredicative-set\" instead of \"-impredicative-set\""),
         &["-Q", phys_path, log_path, ref rest @ ..] => {
+          let log_path = &*String::leak(log_path.into());
           self.includes.push((base.join(phys_path), DirPath::from(log_path)));
           it = rest;
         }
@@ -26,6 +27,7 @@ impl SearchPaths {
           it = rest;
         }
         &["-R", phys_path, log_path, ref rest @ ..] => {
+          let log_path = &*String::leak(log_path.into());
           self.includes.push((base.join(phys_path), DirPath::from(log_path)));
           it = rest;
         }
@@ -103,7 +105,7 @@ impl SearchPaths {
     for (phys, log) in &self.includes {
       if let Some(subdir) = path.0.strip_prefix(&*log.0) {
         let mut phys = phys.to_owned();
-        subdir.iter().for_each(|path| phys.push(path.as_ref()));
+        subdir.iter().for_each(|path| phys.push(path));
         phys.set_extension("vo");
         if phys.exists() {
           return Some(phys)
