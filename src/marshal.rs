@@ -125,7 +125,7 @@ struct ObjectHeader {
 pub enum Data {
   Atom(u8),
   Int(i64),
-  Pointer(usize),
+  Pointer(u32),
   Code(usize),
 }
 
@@ -157,21 +157,23 @@ pub fn parse_objects<'a>(
   let mut result = Data::Atom(0);
   loop {
     let (data, to_push) = match parse_object(pos) {
-      Tag::Pointer(n) => (Data::Pointer(objects.len() - n), None),
+      Tag::Pointer(n) => (Data::Pointer((objects.len() - n).try_into().unwrap()), None),
       Tag::Int(n) => (Data::Int(n), None),
-      Tag::Str(s) => (Data::Pointer(push_vec(objects, Object::Str(s))), None),
+      Tag::Str(s) => (Data::Pointer(push_vec(objects, Object::Str(s)).try_into().unwrap()), None),
       Tag::Block(tag, 0) => (Data::Atom(tag), None),
       Tag::Block(tag, len) => {
         let args = arena.alloc_extend(std::iter::repeat(Data::Atom(0)).take(len));
-        let p = push_vec(objects, Object::Struct(tag, args));
+        let p = push_vec(objects, Object::Struct(tag, args)).try_into().unwrap();
         (Data::Pointer(p), Some(p))
       }
       Tag::Code(addr) => (Data::Code(addr), None),
-      Tag::Int64(n) => (Data::Pointer(push_vec(objects, Object::Int64(n))), None),
-      Tag::Float(n) => (Data::Pointer(push_vec(objects, Object::Float(n))), None),
+      Tag::Int64(n) =>
+        (Data::Pointer(push_vec(objects, Object::Int64(n)).try_into().unwrap()), None),
+      Tag::Float(n) =>
+        (Data::Pointer(push_vec(objects, Object::Float(n)).try_into().unwrap()), None),
     };
     if let Some((p, off)) = stack.last_mut() {
-      let Object::Struct(_, args) = &mut objects[*p] else { unreachable!() };
+      let Object::Struct(_, args) = &mut objects[*p as usize] else { unreachable!() };
       args[*off] = data;
       *off += 1;
       if *off == args.len() {

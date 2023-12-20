@@ -1,7 +1,7 @@
 use crate::marshal::{Data, Object};
 use crate::parse::{Any, Cacheable, FromData};
 use itertools::Itertools;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 macro_rules! from_data_enum {
@@ -68,7 +68,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RList<T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
 }
 
-#[derive(Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DirPath(pub Vec<Arc<str>>);
 pub type CompilationUnitName = DirPath;
 
@@ -102,9 +102,6 @@ impl std::fmt::Debug for VoDigest {
   }
 }
 
-pub type HSet<V> = BTreeMap<i64, BTreeSet<V>>;
-pub type HMap<K, V> = BTreeMap<i64, BTreeMap<K, V>>;
-
 pub type Id = Arc<str>;
 
 pub type UId = (i64, Id, DirPath);
@@ -117,7 +114,7 @@ pub type Constant = KerPair;
 pub type UnivConstraint = (Level, ConstraintType, Level);
 pub type Constraints = BTreeSet<UnivConstraint>;
 pub type Constrained<T> = (T, Constraints);
-pub type UniverseSet = HSet<Level>;
+pub type UniverseSet = HashSet<Level>;
 pub type ContextSet = Constrained<UniverseSet>;
 pub type Instance = Arc<[Level]>;
 // pub type Instance = (Vec<Quality>, Vec<Level>); // added in 8.20
@@ -129,8 +126,6 @@ pub type CoFix = (u32, RecDecl);
 
 pub type RelContext = RList<RelDecl>;
 pub type NamedContext = RList<Arc<NamedDecl>>;
-
-pub type DeltaResolver = (BTreeMap<ModPath, ModPath>, HMap<KerName, DeltaHint>);
 
 pub type FieldInfo = (Id, Vec<Label>, Vec<Relevance>, Vec<Type>);
 pub type StructBody = List<(Label, StructFieldBody)>;
@@ -156,7 +151,7 @@ from_data_enum_rec! {
 }
 
 from_data_enum! {
-  #[derive(PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub enum KerPairKind {
     Same(a: KerName) = 0,
     Dual(user: KerName, canon: KerName) = 1,
@@ -166,6 +161,9 @@ impl KerPairKind {
   pub fn user(&self) -> &KerName {
     let (KerPairKind::Same(a) | KerPairKind::Dual(a, _)) = self;
     a
+  }
+  pub fn new(user: KerName, canon: KerName) -> KerPair {
+    Arc::new(if user == canon { Self::Same(user) } else { Self::Dual(user, canon) })
   }
 }
 
@@ -192,17 +190,17 @@ impl Ord for UserKerPair {
 }
 
 from_data_enum! {
-  #[derive(PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub enum RawLevel {
     Set = 0,
     Level(a: GlobalLevel) = 0,
     Var(a: u32) = 1,
   }
 
-  #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
   pub enum QVar {
     Var(a: u32) = 0,
-    Unif(a: String, b: u32) = 1,
+    Unif(a: Arc<str>, b: u32) = 1,
   }
 
   #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -244,7 +242,7 @@ from_data_enum! {
     QSort = 4,
   }
 
-  #[derive(Debug)]
+  #[derive(Debug, Clone)]
   pub enum Relevance {
     Relevant = 0,
     Irrelevant = 1,
@@ -497,10 +495,10 @@ from_data_enum_rec! {
 
   #[derive(Debug)]
   pub enum StructFieldBody {
-    Const(a: Box<ConstBody>) = 0,
-    MutInd(a: Box<MutIndBody>) = 1,
+    Const(a: Arc<ConstBody>) = 0,
+    MutInd(a: Arc<MutIndBody>) = 1,
     Module(a: Arc<ModBody>) = 2,
-    ModType(a: Box<ModTypeBody>) = 3,
+    ModType(a: Arc<ModTypeBody>) = 3,
   }
 
   #[derive(Debug)]
@@ -601,7 +599,7 @@ pub type CaseBranch = (Arc<[Arc<BinderAnnot<Name>>]>, Expr);
 pub type CaseReturn = (Arc<[Arc<BinderAnnot<Name>>]>, Type);
 // pub type CaseReturn = ((Vec<Arc<BinderAnnot<Name>>>, Type), Relevance); // new in 8.20
 
-pub type EntryMap<T> = (HMap<Constant, T>, HMap<MutIndName, T>);
+pub type EntryMap<T> = (HashMap<Constant, T>, HashMap<MutIndName, T>);
 pub type ExpandInfo = EntryMap<Arc<AbstrInstInfo>>;
 
 impl std::fmt::Debug for GlobalLevel {
@@ -638,7 +636,15 @@ from_data_struct! {
     pub label: Label,
     pub hash: i64,
   }
+}
 
+impl KerNameKind {
+  pub fn new(path: ModPath, label: Label) -> KerName {
+    Arc::new(KerNameKind { path, label, hash: 0 }) // todo
+  }
+}
+
+from_data_struct! {
   #[derive(Debug)]
   pub struct IndNameKind {
     pub name: MutIndName,
@@ -651,14 +657,14 @@ from_data_struct! {
     pub index: u32,
   }
 
-  #[derive(PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct GlobalLevel {
     pub lib: DirPath,
     pub process: Arc<str>,
     pub uid: u32,
   }
 
-  #[derive(PartialEq, Eq, PartialOrd, Ord)]
+  #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct LevelKind {
     pub hash: i64,
     pub data: RawLevel,
@@ -726,7 +732,7 @@ from_data_struct! {
   #[derive(Debug)]
   pub struct ConvOracle {
     pub var_opacity: BTreeMap<Id, Transparency>,
-    pub cst_opacity: HMap<Constant, Transparency>,
+    pub cst_opacity: HashMap<Constant, Transparency>,
     pub var_trstate: Predicate<Id>,
     pub cst_trstate: Predicate<Constant>,
   }
@@ -817,6 +823,49 @@ from_data_struct! {
   }
 
   #[derive(Debug)]
+  pub struct DeltaResolver {
+    pub mod_: BTreeMap<ModPath, ModPath>,
+    pub name: HashMap<KerName, DeltaHint>,
+  }
+}
+
+impl DeltaResolver {
+  fn find_prefix(&self, mp: &ModPath) -> Option<ModPath> {
+    if let Some(res) = self.mod_.get(mp) {
+      return Some(res.clone())
+    }
+    if let ModPathKind::Dot(mp, n) = &**mp {
+      Some(Arc::new(ModPathKind::Dot(self.find_prefix(mp)?, n.clone())))
+    } else {
+      None
+    }
+  }
+
+  fn resolve_kername_core(&self, kn: &KerName) -> Result<KerName, (u32, &UnivAbstracted<Expr>)> {
+    match self.name.get(kn) {
+      Some(DeltaHint::Inline(lev, Some(c))) => Err((*lev, c)),
+      Some(DeltaHint::Equiv(kn1)) => Ok(kn1.clone()),
+      Some(DeltaHint::Inline(_, None)) | None => {
+        if let Some(mp) = self.find_prefix(&kn.path).filter(|p| *p != kn.path) {
+          Ok(KerNameKind::new(mp, kn.label.clone()))
+        } else {
+          Ok(kn.clone())
+        }
+      }
+    }
+  }
+
+  pub fn resolve_kername(&self, kn: &KerName) -> KerName {
+    self.resolve_kername_core(kn).unwrap_or(kn.clone())
+  }
+
+  pub fn resolve_kerpair(&self, kn: &KerName) -> KerPair {
+    KerPairKind::new(kn.clone(), self.resolve_kername(kn).clone())
+  }
+}
+
+from_data_struct! {
+  #[derive(Debug)]
   pub struct ModBody {
     pub path: ModPath,
     pub expr: ModImpl,
@@ -867,11 +916,13 @@ macro_rules! mk_cache {
     #[derive(Default)]
     pub struct $cache {
       // used: HashMap<usize, std::backtrace::Backtrace>,
-      $($name: HashMap<usize, Arc<$ty>>,)*
+      $($name: HashMap<u32, Arc<$ty>>,)*
     }
     $(
       impl Cacheable for $ty {
-        fn get_mut(cache: &mut $cache) -> &mut HashMap<usize, Arc<Self>> { &mut cache.$name }
+        fn get_mut(cache: &mut $cache) -> &mut HashMap<u32, Arc<Self>> {
+          &mut cache.$name
+        }
       }
       mk_cache!(@impl $ty $(: $from)?);
     )*
@@ -916,5 +967,8 @@ mk_cache! {
     proj_repr: ProjRepr,
     proj: (Arc<ProjRepr>, bool),
     mod_body: ModBody,
+    mod_type_body: ModTypeBody,
+    const_body: ConstBody,
+    mut_ind_body: MutIndBody,
   }
 }

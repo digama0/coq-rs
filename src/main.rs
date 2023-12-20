@@ -9,6 +9,10 @@ mod parse;
 mod types;
 
 fn main() {
+  std::env::set_current_dir("../metacoq").unwrap();
+  let base: &Path = "pcuic".as_ref();
+  let target = DirPath::from("MetaCoq.PCUIC.PCUICAlpha");
+
   let root = {
     let script = "eval $(opam env --cli=2.1 --shell=sh); echo $OPAM_SWITCH_PREFIX";
     let out = Command::new("sh").arg("-c").arg(script).output().unwrap().stdout;
@@ -28,12 +32,10 @@ fn main() {
   let theories_dir = coqlib.join("theories");
   assert!(theories_dir.join("Init/Prelude.vo").exists());
   assert!(coqcorelib.join("plugins").exists());
-  let base: &Path = "../metacoq/pcuic".as_ref();
   let mut env = environment::Environment::default();
   env.paths.includes.push((coqlib.join("theories"), "Coq".into()));
   env.paths.includes.push((coqlib.join("user-contrib"), DirPath(vec![])));
   env.paths.parse(&base.join("_CoqProject"), base).unwrap();
-  let target = DirPath::from("MetaCoq.PCUIC.PCUICAlpha");
   env.get_or_load_lib(&target, true);
   std::mem::forget(env); // rust has trouble dropping deeply nested exprs
 }

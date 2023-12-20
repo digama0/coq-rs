@@ -4,7 +4,7 @@ use crate::types::{
   Cache, CompiledLibrary, DirPath, Library, List, OpaqueProof, RList, Summary, VoDigest,
 };
 use byteorder::{ReadBytesExt, BE};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{io, sync::Arc};
 use zerocopy::big_endian::{U32, U64};
 use zerocopy::{FromBytes, FromZeroes, Ref, Unaligned};
@@ -13,7 +13,7 @@ impl Data {
   pub fn dest_block<'a>(self, mem: &'a [Object<'_>]) -> (u8, &'a [Data]) {
     match self {
       Data::Atom(tag) => (tag, &[]),
-      Data::Pointer(p) => match &mem[p] {
+      Data::Pointer(p) => match &mem[p as usize] {
         Object::Struct(tag, data) => (*tag, data),
         k => panic!("bad data: {k:?}"),
       },
@@ -24,7 +24,7 @@ impl Data {
 
   pub fn dest_str<'a>(self, mem: &[Object<'a>]) -> &'a [u8] {
     match self {
-      Data::Pointer(p) => match &mem[p] {
+      Data::Pointer(p) => match &mem[p as usize] {
         Object::Str(data) => data,
         _ => panic!("bad data"),
       },
@@ -33,7 +33,7 @@ impl Data {
   }
   pub fn dest_int(self, mem: &[Object<'_>]) -> i64 {
     match self {
-      Data::Pointer(p) => match mem[p] {
+      Data::Pointer(p) => match mem[p as usize] {
         Object::Int64(data) => data,
         _ => panic!("bad data"),
       },
@@ -43,7 +43,7 @@ impl Data {
   }
   pub fn dest_float(self, mem: &[Object<'_>]) -> f64 {
     match self {
-      Data::Pointer(p) => match mem[p] {
+      Data::Pointer(p) => match mem[p as usize] {
         Object::Float(data) => data,
         _ => panic!("bad data"),
       },
@@ -53,7 +53,7 @@ impl Data {
 }
 
 pub trait Cacheable {
-  fn get_mut(cache: &mut Cache) -> &mut HashMap<usize, Arc<Self>>;
+  fn get_mut(cache: &mut Cache) -> &mut HashMap<u32, Arc<Self>>;
 }
 
 impl Cache {
@@ -169,45 +169,89 @@ impl FromData for Box<[u8]> {
   }
 }
 
-impl<T: FromData + Ord> FromData for BTreeSet<T> {
-  fn from_data(mut d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
-    let mut stack = vec![];
-    let mut out = BTreeSet::new();
-    loop {
-      match d.dest_block(mem) {
-        (0, []) => match stack.pop() {
-          Some(v) => d = v,
-          None => return out,
-        },
-        (0, [l, v, r, _]) => {
-          out.insert(T::from_data(*v, mem, cache));
-          d = *l;
-          stack.push(*r);
-        }
-        k => panic!("bad tag: {k:?}"),
+fn parse_set(
+  mut d: Data, mem: &[Object<'_>], cache: &mut Cache, stack: &mut Vec<Data>,
+  f: &mut impl FnMut(Data, &mut Cache),
+) {
+  loop {
+    match d.dest_block(mem) {
+      (0, []) => match stack.pop() {
+        Some(v) => d = v,
+        None => return,
+      },
+      (0, [l, k, r, _]) => {
+        f(*k, cache);
+        d = *l;
+        stack.push(*r);
       }
+      k => panic!("bad tag: {k:?}"),
     }
   }
 }
 
-impl<K: FromData + Ord, V: FromData> FromData for BTreeMap<K, V> {
-  fn from_data(mut d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
-    let mut stack = vec![];
-    let mut out = BTreeMap::new();
-    loop {
-      match d.dest_block(mem) {
-        (0, []) => match stack.pop() {
-          Some(v) => d = v,
-          None => return out,
-        },
-        (0, [l, k, v, r, _]) => {
-          out.insert(K::from_data(*k, mem, cache), V::from_data(*v, mem, cache));
-          d = *l;
-          stack.push(*r);
-        }
-        k => panic!("bad tag: {k:?}"),
+fn parse_map(
+  mut d: Data, mem: &[Object<'_>], cache: &mut Cache, stack: &mut Vec<Data>,
+  f: &mut impl FnMut(Data, Data, &mut Cache),
+) {
+  loop {
+    match d.dest_block(mem) {
+      (0, []) => match stack.pop() {
+        Some(v) => d = v,
+        None => return,
+      },
+      (0, [l, k, v, r, _]) => {
+        f(*k, *v, cache);
+        d = *l;
+        stack.push(*r);
       }
+      k => panic!("bad tag: {k:?}"),
     }
+  }
+}
+
+impl<T: FromData + Ord> FromData for BTreeSet<T> {
+  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+    let mut out = BTreeSet::new();
+    parse_set(d, mem, cache, &mut vec![], &mut |k, cache| {
+      out.insert(T::from_data(k, mem, cache));
+    });
+    out
+  }
+}
+
+impl<K: FromData + Ord, V: FromData> FromData for BTreeMap<K, V> {
+  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+    let mut out = BTreeMap::new();
+    parse_map(d, mem, cache, &mut vec![], &mut |k, v, cache| {
+      out.insert(K::from_data(k, mem, cache), V::from_data(v, mem, cache));
+    });
+    out
+  }
+}
+
+impl<T: FromData + std::hash::Hash + Eq> FromData for HashSet<T> {
+  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+    let mut stack = vec![];
+    let mut out = HashSet::new();
+    parse_map(d, mem, cache, &mut vec![], &mut |_, v, cache| {
+      parse_set(v, mem, cache, &mut stack, &mut |k, cache| {
+        out.insert(T::from_data(k, mem, cache));
+      })
+    });
+    out
+  }
+}
+
+impl<K: FromData + std::hash::Hash + Eq, V: FromData> FromData for HashMap<K, V> {
+  fn from_data(d: Data, mem: &[Object<'_>], cache: &mut Cache) -> Self {
+    let mut stack = vec![];
+    let mut out = HashMap::new();
+    parse_map(d, mem, cache, &mut vec![], &mut |_, v, cache| {
+      parse_map(v, mem, cache, &mut stack, &mut |k, v, cache| {
+        out.insert(K::from_data(k, mem, cache), V::from_data(v, mem, cache));
+      })
+    });
+    out
   }
 }
 
